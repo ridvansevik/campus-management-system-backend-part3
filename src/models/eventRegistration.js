@@ -7,7 +7,15 @@ module.exports = (sequelize, DataTypes) => {
     },
     event_id: DataTypes.UUID,
     user_id: DataTypes.UUID,
+    registration_date: {
+      type: DataTypes.DATE,
+      defaultValue: DataTypes.NOW
+    },
     qr_code: DataTypes.TEXT,
+    custom_fields_json: {
+      type: DataTypes.JSONB,
+      defaultValue: {}
+    },
     checked_in: { type: DataTypes.BOOLEAN, defaultValue: false },
     checked_in_at: DataTypes.DATE
   });

@@ -16,6 +16,7 @@ module.exports = (sequelize, DataTypes) => {
     registered_count: { type: DataTypes.INTEGER, defaultValue: 0 },
     is_paid: { type: DataTypes.BOOLEAN, defaultValue: false },
     price: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0 },
+    registration_deadline: DataTypes.DATEONLY,
     status: { type: DataTypes.ENUM('active', 'cancelled', 'completed'), defaultValue: 'active' }
   });
 

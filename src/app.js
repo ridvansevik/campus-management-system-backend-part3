@@ -75,6 +75,7 @@ app.use('/api/v1/meals', mealRoutes);
 app.use('/api/v1/wallet', walletRoutes);
 app.use('/api/v1/events', eventRoutes);
 app.use('/api/v1/scheduling', scheduleRoutes);
+app.use('/api/v1/reservations', require('./routes/reservationRoutes')); // Part 3: Classroom reservations
 
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 

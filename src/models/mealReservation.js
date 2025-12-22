@@ -14,6 +14,11 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.TEXT,
       allowNull: false
     },
+    amount: {
+      type: DataTypes.DECIMAL(10, 2),
+      allowNull: false,
+      defaultValue: 0.00
+    },
     status: {
       type: DataTypes.ENUM('reserved', 'used', 'cancelled'),
       defaultValue: 'reserved'

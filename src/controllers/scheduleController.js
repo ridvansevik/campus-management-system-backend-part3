@@ -1,23 +1,106 @@
-const { Schedule, CourseSection, Classroom, Reservation, sequelize } = require('../models');
+const { Schedule, CourseSection, Classroom, Reservation, Enrollment, Student, Faculty, Course, sequelize, User } = require('../models');
 const { Op } = require('sequelize');
+const schedulingService = require('../services/schedulingService');
 
-exports.getMySchedule = async (req, res) => {
+// YENİ: Program Detayı (Part 3: GET /api/v1/scheduling/:scheduleId)
+exports.getScheduleDetail = async (req, res) => {
   try {
-    // Burada enrollment üzerinden öğrencinin dersleri çekilip program oluşturulmalı.
-    // Şimdilik basitleştirilmiş bir örnek yapıyoruz.
-    // Gerçek senaryoda: Enrollment -> Section -> Schedule bağlantısı kurulur.
+    const { scheduleId } = req.params;
     
-    // Örnek: Tüm programı döndür (MVP için)
-    const schedules = await Schedule.findAll({
+    const schedule = await Schedule.findByPk(scheduleId, {
       include: [
         { 
           model: CourseSection, 
           as: 'section',
-          include: [{ model: Course, as: 'course' }] 
+          include: [
+            { model: Course, as: 'course' },
+            { model: Faculty, as: 'instructor' }
+          ]
         },
         { model: Classroom, as: 'classroom' }
       ]
     });
+
+    if (!schedule) {
+      return res.status(404).json({ success: false, message: 'Program bulunamadı' });
+    }
+
+    res.json({ success: true, data: schedule });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+exports.getMySchedule = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const user = await User.findByPk(userId);
+    
+    let schedules = [];
+
+    if (user.role === 'student') {
+      // Öğrenci için: Enrollment -> Section -> Schedule
+      const student = await Student.findOne({ where: { userId } });
+      if (student) {
+        const enrollments = await Enrollment.findAll({
+          where: { 
+            studentId: student.id,
+            status: 'enrolled'
+          },
+          include: [{
+            model: CourseSection,
+            as: 'section',
+            include: [
+              { model: Course, as: 'course' },
+              { model: Faculty, as: 'instructor' }
+            ]
+          }]
+        });
+
+        const sectionIds = enrollments.map(e => e.sectionId);
+        
+        schedules = await Schedule.findAll({
+          where: { section_id: { [Op.in]: sectionIds } },
+          include: [
+            { 
+              model: CourseSection, 
+              as: 'section',
+              include: [
+                { model: Course, as: 'course' },
+                { model: Faculty, as: 'instructor' }
+              ]
+            },
+            { model: Classroom, as: 'classroom' }
+          ],
+          order: [
+            ['day_of_week', 'ASC'],
+            ['start_time', 'ASC']
+          ]
+        });
+      }
+    } else if (user.role === 'faculty') {
+      // Öğretim üyesi için: Verdiği derslerin programı
+      const faculty = await Faculty.findOne({ where: { userId } });
+      if (faculty) {
+        schedules = await Schedule.findAll({
+          include: [
+            { 
+              model: CourseSection, 
+              as: 'section',
+              where: { instructorId: faculty.id },
+              include: [
+                { model: Course, as: 'course' }
+              ]
+            },
+            { model: Classroom, as: 'classroom' }
+          ],
+          order: [
+            ['day_of_week', 'ASC'],
+            ['start_time', 'ASC']
+          ]
+        });
+      }
+    }
     
     res.json({ success: true, data: schedules });
   } catch (error) {
@@ -67,78 +150,80 @@ exports.createReservation = async (req, res) => {
   }
 };
 
-// YENİ: Otomatik Program Oluşturma (Admin)
+// YENİ: Otomatik Program Oluşturma (Admin) - CSP Algoritması ile
 exports.generateSchedule = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    // 1. Mevcut programı temizle (İsteğe bağlı, dönemlik temizlik)
-    // await Schedule.destroy({ where: {}, transaction: t });
+    const { semester, year, clearExisting = false } = req.body;
+
+    // 1. Mevcut programı temizle (isteğe bağlı)
+    if (clearExisting) {
+      await Schedule.destroy({ where: {}, transaction: t });
+    }
 
     // 2. Programlanacak dersleri (section) ve derslikleri çek
+    const whereClause = {};
+    if (semester) whereClause.semester = semester;
+    if (year) whereClause.year = year;
+
     const sections = await CourseSection.findAll({ 
-      where: { schedule_json: null } // Henüz programlanmamışlar
+      where: whereClause,
+      include: [
+        { model: Course, as: 'course' },
+        { model: Faculty, as: 'instructor' }
+      ]
     });
+
     const classrooms = await Classroom.findAll();
 
-    const createdSchedules = [];
+    // 3. Zaman dilimleri tanımla
     const timeSlots = [
-      { start: '09:00', end: '11:50' },
-      { start: '13:00', end: '15:50' },
-      { start: '16:00', end: '18:50' }
+      { start: '09:00', end: '10:40' },
+      { start: '11:00', end: '12:40' },
+      { start: '13:00', end: '14:40' },
+      { start: '15:00', end: '16:40' },
+      { start: '17:00', end: '18:40' }
     ];
-    const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
-    // Basit GREEDY Algoritması (Backtracking yerine)
-    // Her ders için boş bir yer arar
-    for (const section of sections) {
-      let scheduled = false;
+    // 4. Constraints (şimdilik boş, ileride instructor preferences eklenebilir)
+    const constraints = {
+      instructorPreferences: {} // İleride eklenebilir
+    };
 
-      for (const day of days) {
-        if (scheduled) break;
-        for (const slot of timeSlots) {
-          if (scheduled) break;
-          
-          for (const room of classrooms) {
-            // Hard Constraint 1: Kapasite
-            if (room.capacity < section.capacity) continue;
+    // 5. CSP algoritması ile program oluştur
+    const result = schedulingService.generateSchedule(sections, classrooms, timeSlots, constraints);
 
-            // Hard Constraint 2: Çakışma Kontrolü
-            // Bu odada, bu gün ve saatte başka ders var mı?
-            const conflict = await Schedule.findOne({
-              where: {
-                classroom_id: room.id,
-                day_of_week: day,
-                start_time: slot.start
-              },
-              transaction: t
-            });
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: `${result.unassigned.length} ders için uygun yer bulunamadı.`,
+        unassigned: result.unassigned
+      });
+    }
 
-            if (!conflict) {
-              // Uygun bulundu, ata!
-              const newSchedule = await Schedule.create({
-                section_id: section.id,
-                classroom_id: room.id,
-                day_of_week: day,
-                start_time: slot.start,
-                end_time: slot.end
-              }, { transaction: t });
+    // 6. Oluşturulan programı veritabanına kaydet
+    const createdSchedules = [];
+    for (const assignment of result.schedule) {
+      const schedule = await Schedule.create({
+        section_id: assignment.section_id,
+        classroom_id: assignment.classroom_id,
+        day_of_week: assignment.day,
+        start_time: assignment.start_time,
+        end_time: assignment.end_time
+      }, { transaction: t });
 
-              createdSchedules.push(newSchedule);
-              
-              // Section'ı güncelle
-              await section.update({ 
-                schedule_json: { day, time: slot.start, room: room.code } 
-              }, { transaction: t });
+      createdSchedules.push(schedule);
 
-              scheduled = true;
-              break; // Diğer odalara bakma, bir sonraki section'a geç
-            }
+      // Section'ı güncelle (schedule_json)
+      const section = sections.find(s => s.id === assignment.section_id);
+      if (section) {
+        await section.update({
+          schedule_json: {
+            day: assignment.day,
+            time: assignment.start_time,
+            room: classrooms.find(c => c.id === assignment.classroom_id)?.code || ''
           }
-        }
-      }
-      
-      if (!scheduled) {
-        console.warn(`Section ${section.id} için uygun yer bulunamadı!`);
+        }, { transaction: t });
       }
     }
 
@@ -177,21 +262,28 @@ exports.updateReservationStatus = async (req, res) => {
   }
 };
 
-// YENİ: Rezervasyon Listesi (Admin - Filtreleme ile)
+// YENİ: Rezervasyon Listesi (Part 3: filter by date, classroom, user)
 exports.getClassroomReservations = async (req, res) => {
   try {
-    const { status, date, classroomId } = req.query;
+    const { status, date, classroomId, userId } = req.query;
     const whereClause = {};
 
+    // Part 3: Filter by status, date, classroom, user
     if (status) whereClause.status = status;
     if (date) whereClause.date = date;
     if (classroomId) whereClause.classroom_id = classroomId;
+    if (userId) whereClause.user_id = userId;
+
+    // Admin değilse sadece kendi rezervasyonlarını görebilir
+    if (req.user.role !== 'admin' && req.user.role !== 'staff') {
+      whereClause.user_id = req.user.id;
+    }
 
     const reservations = await Reservation.findAll({
       where: whereClause,
       include: [
         { model: Classroom },
-        { model: require('../models').User, as: 'requester', attributes: ['id', 'name'] }
+        { model: User, as: 'requester', attributes: ['id', 'name', 'email'] }
       ],
       order: [['date', 'ASC'], ['start_time', 'ASC']]
     });
@@ -202,40 +294,104 @@ exports.getClassroomReservations = async (req, res) => {
   }
 };
 
-// YENİ: iCal Export (Basit .ics oluşturucu)
+// YENİ: iCal Export (.ics dosyası oluştur)
 exports.exportIcal = async (req, res) => {
   try {
     const userId = req.user.id;
-    // Öğrencinin ders programını çek (Basitleştirilmiş)
-    const schedules = await Schedule.findAll({
-      include: [
-        { model: CourseSection, as: 'section', include: [{ model: require('../models').Course, as: 'course' }] },
-        { model: Classroom, as: 'classroom' }
-      ]
-      // Not: Gerçekte Enrollment -> Section -> Schedule ilişkisi kurulmalı
-    });
+    const user = await User.findByPk(userId);
+    
+    let schedules = [];
 
-    let icsContent = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//SmartCampus//EN\n";
+    // getMySchedule mantığını kullan
+    if (user.role === 'student') {
+      const student = await Student.findOne({ where: { userId } });
+      if (student) {
+        const enrollments = await Enrollment.findAll({
+          where: { studentId: student.id, status: 'enrolled' }
+        });
+        const sectionIds = enrollments.map(e => e.sectionId);
+        
+        schedules = await Schedule.findAll({
+          where: { section_id: { [Op.in]: sectionIds } },
+          include: [
+            { model: CourseSection, as: 'section', include: [{ model: Course, as: 'course' }] },
+            { model: Classroom, as: 'classroom' }
+          ]
+        });
+      }
+    } else if (user.role === 'faculty') {
+      const faculty = await Faculty.findOne({ where: { userId } });
+      if (faculty) {
+        schedules = await Schedule.findAll({
+          include: [
+            { model: CourseSection, as: 'section', where: { instructorId: faculty.id }, include: [{ model: Course, as: 'course' }] },
+            { model: Classroom, as: 'classroom' }
+          ]
+        });
+      }
+    }
+
+    // iCal formatı oluştur
+    const dayMap = { 'Monday': 'MO', 'Tuesday': 'TU', 'Wednesday': 'WE', 'Thursday': 'TH', 'Friday': 'FR' };
+    
+    // Haftanın ilk gününü bul (bugünden itibaren)
+    const today = new Date();
+    const dayOfWeek = today.getDay(); // 0=Pazar, 1=Pazartesi...
+    const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // Pazartesi'ye kaç gün var
+    const monday = new Date(today);
+    monday.setDate(today.getDate() - mondayOffset);
+    monday.setHours(0, 0, 0, 0);
+
+    let icsContent = "BEGIN:VCALENDAR\r\n";
+    icsContent += "VERSION:2.0\r\n";
+    icsContent += "PRODID:-//SmartCampus//EN\r\n";
+    icsContent += "CALSCALE:GREGORIAN\r\n";
 
     schedules.forEach(sch => {
-      // iCal tarih formatı karmaşıktır, burada basitleştirilmiş örnek veriyorum.
-      // Gerçek implementasyonda 'ical-generator' paketi kullanmak en iyisidir.
-      // Haftalık tekrar eden etkinlikler için RRULE kullanılır.
-      
-      const dayMap = { 'Monday': 'MO', 'Tuesday': 'TU', 'Wednesday': 'WE', 'Thursday': 'TH', 'Friday': 'FR' };
-      const rruleDay = dayMap[sch.day_of_week];
+      const dayIndex = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'].indexOf(sch.day_of_week);
+      if (dayIndex === -1) return;
 
-      icsContent += "BEGIN:VEVENT\n";
-      icsContent += `SUMMARY:${sch.section.course.code} - ${sch.section.course.name}\n`;
-      icsContent += `LOCATION:${sch.classroom.code}\n`;
-      icsContent += `RRULE:FREQ=WEEKLY;BYDAY=${rruleDay}\n`; 
-      // DTSTART ve DTEND hesaplaması o haftanın ilk gününe göre yapılmalı
-      icsContent += "END:VEVENT\n";
+      const eventDate = new Date(monday);
+      eventDate.setDate(monday.getDate() + dayIndex);
+
+      // DTSTART ve DTEND hesapla
+      const [startHour, startMin] = sch.start_time.split(':').map(Number);
+      const [endHour, endMin] = sch.end_time.split(':').map(Number);
+
+      const dtStart = new Date(eventDate);
+      dtStart.setHours(startHour, startMin, 0, 0);
+
+      const dtEnd = new Date(eventDate);
+      dtEnd.setHours(endHour, endMin, 0, 0);
+
+      // iCal format: YYYYMMDDTHHMMSS
+      const formatDate = (date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        return `${year}${month}${day}T${hours}${minutes}${seconds}`;
+      };
+
+      const rruleDay = dayMap[sch.day_of_week];
+      const summary = `${sch.section?.course?.code || 'Ders'} - ${sch.section?.course?.name || 'İsimsiz'}`;
+      const location = sch.classroom?.code || 'Derslik';
+
+      icsContent += "BEGIN:VEVENT\r\n";
+      icsContent += `DTSTART:${formatDate(dtStart)}\r\n`;
+      icsContent += `DTEND:${formatDate(dtEnd)}\r\n`;
+      icsContent += `RRULE:FREQ=WEEKLY;BYDAY=${rruleDay};COUNT=14\r\n`; // 14 hafta (bir dönem)
+      icsContent += `SUMMARY:${summary}\r\n`;
+      icsContent += `LOCATION:${location}\r\n`;
+      icsContent += `DESCRIPTION:${sch.section?.course?.description || ''}\r\n`;
+      icsContent += "END:VEVENT\r\n";
     });
 
-    icsContent += "END:VCALENDAR";
+    icsContent += "END:VCALENDAR\r\n";
 
-    res.setHeader('Content-Type', 'text/calendar');
+    res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename=my-schedule.ics');
     res.send(icsContent);
 

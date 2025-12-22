@@ -13,6 +13,9 @@ const { ROLES, TOKEN_EXPIRATION } = require('../config/constants');
 exports.register = asyncHandler(async (req, res, next) => {
   const { email, password, role, student_number, department_id, employee_number, title, name } = req.body;
 
+  // department_id boş string veya undefined ise null yap
+  const finalDepartmentId = (department_id && department_id.trim() !== '') ? department_id : null;
+
   const t = await sequelize.transaction();
 
   try {
@@ -32,7 +35,7 @@ exports.register = asyncHandler(async (req, res, next) => {
       await Student.create({
         userId: newUser.id,
         student_number: student_number || `ST-${Date.now()}`,
-        departmentId: department_id || null,
+        departmentId: finalDepartmentId,
         current_semester: 1
       }, { transaction: t }); // <--- t eklendi
     } else if (role === ROLES.FACULTY) {
@@ -40,22 +43,32 @@ exports.register = asyncHandler(async (req, res, next) => {
         userId: newUser.id,
         employee_number: employee_number || `FAC-${Date.now()}`,
         title: title || 'Dr.',
-        departmentId: department_id || null
+        departmentId: finalDepartmentId
       }, { transaction: t }); // <--- t eklendi
     }
 
-    // 3. E-posta Gönder
+    // Her şey başarılıysa veritabanına işle (email göndermeden önce commit et)
+    await t.commit();
+
+    // 3. E-posta Gönder (asenkron, kayıt işlemini engellemez)
+    // Email gönderme başarısız olsa bile kayıt başarılı sayılır
     const verifyUrl = `${process.env.FRONTEND_URL}/verify-email/${verificationToken}`;
     const message = `Hesabınızı doğrulamak için: \n\n${verifyUrl}`;
 
-    await sendEmail({
-      email: newUser.email,
-      subject: 'Hesap Doğrulama',
-      message
-    });
-
-    // Her şey başarılıysa veritabanına işle
-    await t.commit();
+    try {
+      await sendEmail({
+        email: newUser.email,
+        subject: 'Hesap Doğrulama',
+        message
+      });
+      console.log('Doğrulama e-postası başarıyla gönderildi.');
+    } catch (emailError) {
+      // Email gönderme hatası kayıt işlemini etkilemez
+      console.error('E-posta gönderilemedi (SMTP hatası):', emailError.message);
+      console.log('Kullanıcı kaydı başarılı ancak doğrulama e-postası gönderilemedi.');
+      console.log(`Manuel doğrulama URL: ${verifyUrl}`);
+      // Production'da bu durumu loglama servisine bildirebilirsiniz
+    }
 
     res.status(201).json({
       success: true,

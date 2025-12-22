@@ -10,8 +10,11 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false
     },
     type: {
-      type: DataTypes.ENUM('deposit', 'payment', 'refund', 'transfer'),
+      type: DataTypes.ENUM('deposit', 'payment', 'refund', 'transfer', 'pending'),
       allowNull: false
+    },
+    reference_type: {
+      type: DataTypes.STRING // 'meal_reservation', 'event_registration', 'topup', etc.
     },
     amount: {
       type: DataTypes.DECIMAL(10, 2),
