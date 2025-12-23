@@ -399,3 +399,52 @@ exports.exportIcal = async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 };
+
+// YENİ: Kaynak Kullanım Raporu (Utilization Report)
+exports.getResourceUtilization = async (req, res) => {
+  try {
+    // Tüm derslikleri çek
+    const classrooms = await Classroom.findAll({
+      include: [
+        { 
+          model: Schedule, // Ders programındaki kullanımlar
+          required: false 
+        },
+        {
+          model: Reservation, // Rezervasyonlar
+          required: false,
+          where: { status: 'approved' }
+        }
+      ]
+    });
+
+    const report = classrooms.map(room => {
+      // Basit bir kullanım puanı hesaplama
+      // Bir haftada toplam slot sayısı (5 gün * 9 saat = 45 slot) varsayalım
+      const totalSlotsPerWeek = 45; 
+      
+      const scheduledSlots = room.Schedules ? room.Schedules.length : 0;
+      // Rezervasyonları da kabaca slota çevirelim (her rezervasyon 1 slot sayılsın basitleştirme için)
+      const reservationSlots = room.Reservations ? room.Reservations.length : 0;
+
+      const totalUsage = scheduledSlots + reservationSlots;
+      const utilizationRate = (totalUsage / totalSlotsPerWeek) * 100;
+
+      return {
+        classroomId: room.id,
+        code: room.code,
+        capacity: room.capacity,
+        scheduledCourses: scheduledSlots,
+        reservations: reservationSlots,
+        utilizationRate: utilizationRate.toFixed(2) + '%'
+      };
+    });
+
+    // Kullanım oranına göre sırala (En çok kullanılan en üstte)
+    report.sort((a, b) => parseFloat(b.utilizationRate) - parseFloat(a.utilizationRate));
+
+    res.json({ success: true, data: report });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};

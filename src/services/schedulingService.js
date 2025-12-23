@@ -33,29 +33,30 @@ exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) =
   const schedule = [];
   const assignments = new Map(); // section_id -> { day, time, classroom }
   
-  // Instructor ve classroom çakışma takibi
-  const instructorSlots = new Map(); // instructorId -> Set of {day, time}
-  const classroomSlots = new Map(); // classroomId -> Set of {day, time}
-  const studentSchedules = new Map(); // studentId -> Set of {day, time}
+  // Çakışma takibi için haritalar
+  const instructorSlots = new Map(); // instructorId -> Set of {day_time}
+  const classroomSlots = new Map();  // classroomId -> Set of {day_time}
+  
+  // YENİ: Cohort (Grup) çakışması takibi. 
+  // Örn: "Bilgisayar_1_Güz" anahtarı altında toplanan dersler aynı saate konamaz.
+  const cohortSlots = new Map();     // "deptId_year_semester" -> Set of {day_time}
 
   /**
-   * Hard constraint kontrolü
+   * Hard constraint kontrolü (Zorunlu Kurallar)
    */
   const checkHardConstraints = (section, day, timeSlot, classroom) => {
+    const timeKey = `${day}_${timeSlot.start}`;
+
     // 1. Instructor double-booking kontrolü
-    const instructorKey = `${section.instructorId}_${day}_${timeSlot.start}`;
     if (instructorSlots.has(section.instructorId)) {
-      const slots = instructorSlots.get(section.instructorId);
-      if (slots.has(`${day}_${timeSlot.start}`)) {
+      if (instructorSlots.get(section.instructorId).has(timeKey)) {
         return { valid: false, reason: 'Instructor double-booking' };
       }
     }
 
     // 2. Classroom double-booking kontrolü
-    const classroomKey = `${classroom.id}_${day}_${timeSlot.start}`;
     if (classroomSlots.has(classroom.id)) {
-      const slots = classroomSlots.get(classroom.id);
-      if (slots.has(`${day}_${timeSlot.start}`)) {
+      if (classroomSlots.get(classroom.id).has(timeKey)) {
         return { valid: false, reason: 'Classroom double-booking' };
       }
     }
@@ -65,45 +66,45 @@ exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) =
       return { valid: false, reason: 'Classroom capacity insufficient' };
     }
 
-    // 4. Student schedule conflict kontrolü
-    // (Bu kısım enrollment verilerine ihtiyaç duyar, şimdilik basit tutuyoruz)
-    // Gerçek implementasyonda: section.enrollments -> studentId'leri al ve kontrol et
+    // 4. Student Cohort Conflict (Aynı sınıf/dönem dersleri çakışmamalı) [YENİ]
+    if (section.course) {
+      const cohortKey = `${section.course.departmentId}_${section.course.year}_${section.course.semester}`;
+      if (cohortSlots.has(cohortKey)) {
+        if (cohortSlots.get(cohortKey).has(timeKey)) {
+          return { valid: false, reason: 'Student cohort conflict (Schedule overlap for same class)' };
+        }
+      }
+    }
 
     return { valid: true };
   };
 
   /**
-   * Soft constraint skoru hesapla (daha yüksek = daha iyi)
+   * Soft constraint skoru hesapla (Tercihler)
    */
   const evaluateSoftConstraints = (section, day, timeSlot, classroom) => {
     let score = 0;
 
-    // 1. Instructor time preferences (varsa)
+    // 1. Instructor time preferences
     if (constraints.instructorPreferences) {
       const pref = constraints.instructorPreferences[section.instructorId];
       if (pref) {
-        if (pref.preferredDays && pref.preferredDays.includes(day)) {
-          score += 10;
-        }
-        if (pref.preferredTimes && pref.preferredTimes.includes(timeSlot.start)) {
-          score += 10;
-        }
+        if (pref.preferredDays && pref.preferredDays.includes(day)) score += 10;
+        if (pref.preferredTimes && pref.preferredTimes.includes(timeSlot.start)) score += 10;
       }
     }
 
-    // 2. Morning slots for required courses (09:00-12:00 arası)
+    // 2. Morning slots for required courses
     if (section.course && section.course.is_required) {
       const hour = parseInt(timeSlot.start.split(':')[0]);
-      if (hour >= 9 && hour < 12) {
-        score += 15;
-      }
+      if (hour >= 9 && hour < 12) score += 15;
     }
 
-    // 3. Distribute courses evenly (hafta içi dağılım)
+    // 3. Distribute courses evenly (Pazartesi'den Cumaya azalan ağırlık)
     const dayIndex = days.indexOf(day);
-    score += (5 - dayIndex) * 2; // Pazartesi'ye yakın olanlar daha yüksek skor
+    score += (5 - dayIndex) * 2;
 
-    // 4. Classroom features match (varsa)
+    // 4. Classroom features match
     if (section.course && section.course.required_features) {
       const requiredFeatures = section.course.required_features;
       const classroomFeatures = classroom.features || [];
@@ -115,17 +116,17 @@ exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) =
   };
 
   /**
-   * Backtracking algoritması
+   * Recursive Backtracking Algoritması
    */
   const backtrack = (sectionIndex) => {
-    // Tüm section'lar atandıysa başarılı
+    // Tüm section'lar atandıysa işlem başarılıdır
     if (sectionIndex >= sections.length) {
       return true;
     }
 
     const section = sections[sectionIndex];
     
-    // Tüm olası kombinasyonları dene (day, timeSlot, classroom)
+    // Olası adayları (gün, saat, sınıf) topla
     const candidates = [];
     
     for (const day of days) {
@@ -141,12 +142,16 @@ exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) =
       }
     }
 
-    // Soft constraint skoruna göre sırala (en iyiler önce)
+    // Adayları puana göre sırala (Heuristic: En iyi ihtimali önce dene)
     candidates.sort((a, b) => b.score - a.score);
 
-    // Her adayı dene
+    // Her adayı sırayla dene
     for (const candidate of candidates) {
-      // Atamayı yap
+      const timeKey = `${candidate.day}_${candidate.timeSlot.start}`;
+      
+      // --- DO --- (Atama Yap)
+      
+      // 1. Assignment kaydı
       const assignment = {
         section_id: section.id,
         day: candidate.day,
@@ -154,37 +159,48 @@ exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) =
         end_time: candidate.timeSlot.end,
         classroom_id: candidate.classroom.id
       };
-
-      // Çakışma takibine ekle
-      if (!instructorSlots.has(section.instructorId)) {
-        instructorSlots.set(section.instructorId, new Set());
-      }
-      instructorSlots.get(section.instructorId).add(`${candidate.day}_${candidate.timeSlot.start}`);
-
-      if (!classroomSlots.has(candidate.classroom.id)) {
-        classroomSlots.set(candidate.classroom.id, new Set());
-      }
-      classroomSlots.get(candidate.classroom.id).add(`${candidate.day}_${candidate.timeSlot.start}`);
-
       assignments.set(section.id, assignment);
       schedule.push(assignment);
 
-      // Recursive call
-      if (backtrack(sectionIndex + 1)) {
-        return true; // Başarılı
+      // 2. Instructor slot kilitle
+      if (!instructorSlots.has(section.instructorId)) instructorSlots.set(section.instructorId, new Set());
+      instructorSlots.get(section.instructorId).add(timeKey);
+
+      // 3. Classroom slot kilitle
+      if (!classroomSlots.has(candidate.classroom.id)) classroomSlots.set(candidate.classroom.id, new Set());
+      classroomSlots.get(candidate.classroom.id).add(timeKey);
+
+      // 4. Cohort slot kilitle [YENİ] - DÜZELTME BURADA
+      let cohortKey = null;
+      if (section.course) {
+        cohortKey = `${section.course.departmentId}_${section.course.year}_${section.course.semester}`;
+        if (!cohortSlots.has(cohortKey)) cohortSlots.set(cohortKey, new Set());
+        cohortSlots.get(cohortKey).add(timeKey);
       }
 
-      // Backtrack: Atamayı geri al
+      // --- RECURSE --- (Bir sonraki ders için dene)
+      if (backtrack(sectionIndex + 1)) {
+        return true; // Zincirleme başarı
+      }
+
+      // --- UNDO --- (Backtrack: Atamayı geri al)
+      
       schedule.pop();
       assignments.delete(section.id);
-      instructorSlots.get(section.instructorId).delete(`${candidate.day}_${candidate.timeSlot.start}`);
-      classroomSlots.get(candidate.classroom.id).delete(`${candidate.day}_${candidate.timeSlot.start}`);
+      
+      instructorSlots.get(section.instructorId).delete(timeKey);
+      classroomSlots.get(candidate.classroom.id).delete(timeKey);
+      
+      // Cohort slot'u geri al - DÜZELTME BURADA
+      if (cohortKey) {
+        cohortSlots.get(cohortKey).delete(timeKey);
+      }
     }
 
-    return false; // Bu section için uygun yer bulunamadı
+    return false; // Bu section için hiçbir uygun yer bulunamadı, bir önceki adıma dön
   };
 
-  // Algoritmayı çalıştır
+  // Algoritmayı başlat
   const success = backtrack(0);
 
   return {
@@ -221,4 +237,3 @@ exports.checkStudentConflict = (enrollments, day, startTime, endTime) => {
   }
   return false; // Çakışma yok
 };
-
