@@ -9,20 +9,32 @@ const asyncHandler = require('../middleware/async');
 // @desc    Tüm şubeleri listele (Filtreleme ile)
 // @route   GET /api/v1/sections
 exports.getAllSections = asyncHandler(async (req, res, next) => {
-  const { course_id, semester, year } = req.query;
+  const { course_id, semester, year, instructor_id } = req.query;
   const whereClause = {};
 
   if (course_id) whereClause.courseId = course_id;
   if (semester) whereClause.semester = semester;
   if (year) whereClause.year = year;
+  
+  // Öğretim üyesi kendi derslerini görmek istiyorsa
+  if (instructor_id) {
+    whereClause.instructorId = instructor_id;
+  } else if (req.user.role === 'faculty') {
+    // Eğer query'de instructor_id yoksa ama kullanıcı faculty ise, kendi derslerini getir
+    const faculty = await Faculty.findOne({ where: { userId: req.user.id } });
+    if (faculty) {
+      whereClause.instructorId = faculty.id;
+    }
+  }
 
   const sections = await CourseSection.findAll({
     where: whereClause,
     include: [
-      { model: Course, as: 'course', attributes: ['name', 'code'] },
-      { model: Faculty, as: 'instructor', include: [{ model: db.User, as: 'user', attributes: ['name'] }] },
+      { model: Course, as: 'course', attributes: ['name', 'code', 'credits', 'ects'] },
+      { model: Faculty, as: 'instructor', include: [{ model: db.User, as: 'user', attributes: ['name', 'email'] }] },
       { model: Classroom, as: 'classroom' }
-    ]
+    ],
+    order: [['semester', 'DESC'], ['year', 'DESC'], ['section_number', 'ASC']]
   });
 
   res.status(200).json({ success: true, count: sections.length, data: sections });

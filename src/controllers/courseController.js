@@ -1,19 +1,21 @@
 const db = require('../models');
 const Course = db.Course;
 const Department = db.Department;
+const CourseSection = db.CourseSection;
 const { Op } = require('sequelize');
 const ErrorResponse = require('../utils/errorResponse');
 const asyncHandler = require('../middleware/async');
+const { ACTIVE_SEMESTER, ACTIVE_YEAR } = require('../config/systemConfig');
 
 // @desc    Tüm dersleri getir (Arama, Filtreleme, Sayfalama)
 // @route   GET /api/v1/courses
 // @access  Private (Herkes görebilir)
 exports.getAllCourses = asyncHandler(async (req, res, next) => {
   const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 10;
+  const limit = parseInt(req.query.limit) || 100; // Limit artırıldı
   const offset = (page - 1) * limit;
 
-  const { search, department_id } = req.query;
+  const { search, department_id, active_term_only } = req.query;
   const whereClause = {};
 
   // Departmana göre filtrele
@@ -29,13 +31,31 @@ exports.getAllCourses = asyncHandler(async (req, res, next) => {
     ];
   }
 
+  // Eğer active_term_only=true ise, sadece aktif dönemde şubesi olan dersleri göster
+  let includeOptions = [
+    { model: Department, as: 'department', attributes: ['id', 'name', 'code'] }
+  ];
+
+  if (active_term_only === 'true' || active_term_only === true) {
+    // Aktif dönemde şubesi olan dersleri filtrele
+    includeOptions.push({
+      model: CourseSection,
+      as: 'sections',
+      where: {
+        semester: ACTIVE_SEMESTER,
+        year: ACTIVE_YEAR
+      },
+      required: true, // INNER JOIN - sadece şubesi olan dersler
+      attributes: [] // Section detaylarını getirme
+    });
+  }
+
   const { count, rows } = await Course.findAndCountAll({
     where: whereClause,
     limit,
     offset,
-    include: [
-      { model: Department, as: 'department', attributes: ['id', 'name', 'code'] }
-    ],
+    include: includeOptions,
+    distinct: true, // Section join'i nedeniyle duplicate'leri önle
     order: [['code', 'ASC']]
   });
 

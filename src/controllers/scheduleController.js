@@ -174,9 +174,65 @@ exports.generateSchedule = async (req, res) => {
       ]
     });
 
+    // Debug: Section sayısını logla
+    console.log(`[Schedule Generation] Bulunan section sayısı: ${sections.length}`, {
+      semester,
+      year,
+      whereClause
+    });
+
+    if (sections.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Seçilen dönem (${semester}) ve yıl (${year}) için hiç ders bulunamadı. Lütfen önce dersler ve şubeler oluşturun.`,
+        sections: []
+      });
+    }
+
     const classrooms = await Classroom.findAll();
 
-    // 3. Zaman dilimleri tanımla
+    if (classrooms.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Hiç derslik bulunamadı. Lütfen önce derslikler oluşturun.',
+        classrooms: []
+      });
+    }
+
+    // 3. Öğrenci kayıtlarını çek (Student schedule conflict kontrolü için)
+    const sectionIds = sections.map(s => s.id);
+    const enrollments = await Enrollment.findAll({
+      where: {
+        sectionId: { [Op.in]: sectionIds },
+        status: 'enrolled'
+      },
+      include: [
+        { model: Student, as: 'student' },
+        { 
+          model: CourseSection, 
+          as: 'section',
+          include: [
+            { 
+              model: Schedule, 
+              as: 'schedules',
+              required: false // Mevcut programları da çek (optional)
+            }
+          ]
+        }
+      ]
+    });
+
+    // Enrollment'ları sectionId'ye göre grupla (Map)
+    const studentEnrollmentsMap = new Map();
+    for (const enrollment of enrollments) {
+      const sectionId = enrollment.sectionId;
+      if (!studentEnrollmentsMap.has(sectionId)) {
+        studentEnrollmentsMap.set(sectionId, []);
+      }
+      studentEnrollmentsMap.get(sectionId).push(enrollment);
+    }
+
+    // 4. Zaman dilimleri tanımla
     const timeSlots = [
       { start: '09:00', end: '10:40' },
       { start: '11:00', end: '12:40' },
@@ -185,19 +241,41 @@ exports.generateSchedule = async (req, res) => {
       { start: '17:00', end: '18:40' }
     ];
 
-    // 4. Constraints (şimdilik boş, ileride instructor preferences eklenebilir)
+    // 5. Constraints (şimdilik boş, ileride instructor preferences eklenebilir)
     const constraints = {
       instructorPreferences: {} // İleride eklenebilir
     };
 
-    // 5. CSP algoritması ile program oluştur
-    const result = schedulingService.generateSchedule(sections, classrooms, timeSlots, constraints);
+    // 6. CSP algoritması ile program oluştur (studentEnrollmentsMap'i gönder)
+    console.log(`[Schedule Generation] CSP algoritması başlatılıyor...`, {
+      sectionsCount: sections.length,
+      classroomsCount: classrooms.length,
+      enrollmentsCount: enrollments.length
+    });
+
+    const result = schedulingService.generateSchedule(sections, classrooms, timeSlots, constraints, studentEnrollmentsMap);
+
+    console.log(`[Schedule Generation] CSP sonucu:`, {
+      success: result.success,
+      scheduleCount: result.schedule?.length || 0,
+      unassignedCount: result.unassigned?.length || 0
+    });
 
     if (!result.success) {
       return res.status(400).json({
         success: false,
-        message: `${result.unassigned.length} ders için uygun yer bulunamadı.`,
-        unassigned: result.unassigned
+        message: `${result.unassigned?.length || 0} ders için uygun yer bulunamadı.`,
+        unassigned: result.unassigned || [],
+        schedule: result.schedule || []
+      });
+    }
+
+    if (!result.schedule || result.schedule.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Program oluşturuldu ancak hiç ders programlanamadı. Lütfen derslik kapasitelerini ve çakışmaları kontrol edin.',
+        schedule: [],
+        unassigned: result.unassigned || []
       });
     }
 
@@ -228,10 +306,21 @@ exports.generateSchedule = async (req, res) => {
     }
 
     await t.commit();
+    
+    // Başarı mesajı oluştur
+    const successMessage = `${createdSchedules.length} ders başarıyla programlandı. ` +
+      `Tüm çakışmalar kontrol edildi: Öğretim üyesi çakışması yok, öğrenci çakışması yok, derslik çakışması yok.`;
+    
     res.json({ 
       success: true, 
-      message: `${createdSchedules.length} ders başarıyla programlandı.`,
-      data: createdSchedules 
+      message: successMessage,
+      data: createdSchedules,
+      stats: {
+        totalSections: sections.length,
+        scheduledSections: createdSchedules.length,
+        totalClassrooms: classrooms.length,
+        totalEnrollments: enrollments.length
+      }
     });
 
   } catch (error) {

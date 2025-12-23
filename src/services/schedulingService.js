@@ -26,9 +26,10 @@
  * @param {Array} classrooms - Mevcut derslikler
  * @param {Array} timeSlots - Zaman dilimleri
  * @param {Object} constraints - Kısıtlar ve tercihler
+ * @param {Map} studentEnrollmentsMap - sectionId -> Array of enrollments (öğrenci kayıtları)
  * @returns {Array} Oluşturulan program
  */
-exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) => {
+exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}, studentEnrollmentsMap = new Map()) => {
   const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
   const schedule = [];
   const assignments = new Map(); // section_id -> { day, time, classroom }
@@ -40,6 +41,10 @@ exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) =
   // YENİ: Cohort (Grup) çakışması takibi. 
   // Örn: "Bilgisayar_1_Güz" anahtarı altında toplanan dersler aynı saate konamaz.
   const cohortSlots = new Map();     // "deptId_year_semester" -> Set of {day_time}
+  
+  // YENİ: Student schedule conflict takibi
+  // Her öğrencinin mevcut programını takip et: studentId -> Set of {day_time}
+  const studentSlots = new Map();    // studentId -> Set of {day_time}
 
   /**
    * Hard constraint kontrolü (Zorunlu Kurallar)
@@ -72,6 +77,19 @@ exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) =
       if (cohortSlots.has(cohortKey)) {
         if (cohortSlots.get(cohortKey).has(timeKey)) {
           return { valid: false, reason: 'Student cohort conflict (Schedule overlap for same class)' };
+        }
+      }
+    }
+
+    // 5. Student Schedule Conflict (Öğrenci çakışması kontrolü) [YENİ - HARD CONSTRAINT]
+    // Bu section'a kayıtlı öğrencilerin diğer dersleriyle çakışma var mı?
+    const enrollments = studentEnrollmentsMap.get(section.id) || [];
+    for (const enrollment of enrollments) {
+      const studentId = enrollment.studentId || enrollment.student?.id;
+      if (studentId && studentSlots.has(studentId)) {
+        // Öğrencinin bu saatte başka bir dersi var mı?
+        if (studentSlots.get(studentId).has(timeKey)) {
+          return { valid: false, reason: `Student schedule conflict: Student ${studentId} already has a class at ${timeKey}` };
         }
       }
     }
@@ -178,6 +196,18 @@ exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) =
         cohortSlots.get(cohortKey).add(timeKey);
       }
 
+      // 5. Student slots kilitle [YENİ]
+      const enrollments = studentEnrollmentsMap.get(section.id) || [];
+      const affectedStudents = [];
+      for (const enrollment of enrollments) {
+        const studentId = enrollment.studentId || enrollment.student?.id;
+        if (studentId) {
+          if (!studentSlots.has(studentId)) studentSlots.set(studentId, new Set());
+          studentSlots.get(studentId).add(timeKey);
+          affectedStudents.push(studentId);
+        }
+      }
+
       // --- RECURSE --- (Bir sonraki ders için dene)
       if (backtrack(sectionIndex + 1)) {
         return true; // Zincirleme başarı
@@ -194,6 +224,13 @@ exports.generateSchedule = (sections, classrooms, timeSlots, constraints = {}) =
       // Cohort slot'u geri al - DÜZELTME BURADA
       if (cohortKey) {
         cohortSlots.get(cohortKey).delete(timeKey);
+      }
+
+      // Student slots'u geri al [YENİ]
+      for (const studentId of affectedStudents) {
+        if (studentSlots.has(studentId)) {
+          studentSlots.get(studentId).delete(timeKey);
+        }
       }
     }
 
