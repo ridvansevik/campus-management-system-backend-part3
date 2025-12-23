@@ -306,15 +306,31 @@ exports.generateSchedule = async (req, res) => {
     }
 
     await t.commit();
-    
+
+    const scheduleIds = createdSchedules.map(s => s.id);
+    const populatedSchedules = await Schedule.findAll({
+      where: { id: { [Op.in]: scheduleIds } },
+      include: [
+        { 
+          model: CourseSection, 
+          as: 'section',
+          include: [
+            { model: Course, as: 'course' },     // Ders adı için gerekli
+            { model: Faculty, as: 'instructor' }  // Hoca adı için gerekli
+          ]
+        },
+        { model: Classroom, as: 'classroom' }     // Sınıf kodu için gerekli
+      ],
+      order: [['day_of_week', 'ASC'], ['start_time', 'ASC']]
+    });
     // Başarı mesajı oluştur
     const successMessage = `${createdSchedules.length} ders başarıyla programlandı. ` +
       `Tüm çakışmalar kontrol edildi: Öğretim üyesi çakışması yok, öğrenci çakışması yok, derslik çakışması yok.`;
     
-    res.json({ 
+   res.json({ 
       success: true, 
       message: successMessage,
-      data: createdSchedules,
+      data: populatedSchedules,
       stats: {
         totalSections: sections.length,
         scheduledSections: createdSchedules.length,
