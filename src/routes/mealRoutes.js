@@ -1,11 +1,13 @@
 const express = require('express');
 const { 
   getMenus, getMenuDetail, createMenu, updateMenu, deleteMenu,
-  createReservation, getMyReservations, cancelReservation, useReservation 
+  createReservation, getMyReservations, cancelReservation, useReservation,
+  getCafeterias
 } = require('../controllers/mealController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const router = express.Router();
 
+router.get('/cafeterias', protect, getCafeterias);
 router.get('/menus', protect, getMenus);
 router.get('/menus/:id', protect, getMenuDetail);
 router.post('/reservations', protect, createReservation);

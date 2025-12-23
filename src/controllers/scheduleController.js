@@ -1,4 +1,4 @@
-const { Schedule, CourseSection, Classroom, Reservation, Enrollment, Student, Faculty, Course, sequelize, User } = require('../models');
+const { Schedule, CourseSection, Classroom, Reservation, Enrollment, Student, Faculty, Course, sequelize, User, Department } = require('../models');
 const { Op } = require('sequelize');
 const schedulingService = require('../services/schedulingService');
 
@@ -13,8 +13,20 @@ exports.getScheduleDetail = async (req, res) => {
           model: CourseSection, 
           as: 'section',
           include: [
-            { model: Course, as: 'course' },
-            { model: Faculty, as: 'instructor' }
+            { 
+              model: Course, 
+              as: 'course',
+              include: [
+                { model: Department, as: 'department' }
+              ]
+            },
+            { 
+              model: Faculty, 
+              as: 'instructor',
+              include: [
+                { model: User, attributes: ['id', 'name', 'email'] }
+              ]
+            }
           ]
         },
         { model: Classroom, as: 'classroom' }
@@ -26,6 +38,131 @@ exports.getScheduleDetail = async (req, res) => {
     }
 
     res.json({ success: true, data: schedule });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// YENİ: Bölüm Bazlı Ders Programı Listesi (Admin için)
+exports.getSchedulesByDepartment = async (req, res) => {
+  try {
+    const { departmentId, semester, year } = req.query;
+    
+    const whereClause = {};
+    if (semester) whereClause.semester = semester;
+    if (year) whereClause.year = year;
+
+    // Bölüm bazlı filtreleme için Course üzerinden join yapacağız
+    const includeClause = [
+      { 
+        model: CourseSection, 
+        as: 'section',
+        include: [
+          { 
+            model: Course, 
+            as: 'course',
+            include: [
+              { model: Department, as: 'department' }
+            ],
+            ...(departmentId ? { where: { departmentId } } : {})
+          },
+          { 
+            model: Faculty, 
+            as: 'instructor',
+            include: [
+              { model: User, as: 'user', attributes: ['id', 'name', 'email'] }
+            ]
+          }
+        ],
+        ...(Object.keys(whereClause).length > 0 ? { where: whereClause } : {})
+      },
+      { model: Classroom, as: 'classroom' }
+    ];
+
+    const schedules = await Schedule.findAll({
+      include: includeClause,
+      order: [
+        ['day_of_week', 'ASC'],
+        ['start_time', 'ASC']
+      ]
+    });
+
+    // Eğer departmentId varsa, filtreleme yap
+    let filteredSchedules = schedules;
+    if (departmentId) {
+      filteredSchedules = schedules.filter(schedule => 
+        schedule.section?.course?.departmentId === departmentId
+      );
+    }
+
+    res.json({ success: true, data: filteredSchedules });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// YENİ: Tüm Bölümlerin Ders Programları (Admin için - Bölüm bazlı gruplandırılmış)
+exports.getAllDepartmentSchedules = async (req, res) => {
+  try {
+    const { semester, year } = req.query;
+    
+    // Tüm bölümleri çek
+    const departments = await Department.findAll({
+      order: [['name', 'ASC']]
+    });
+
+    // Her bölüm için schedule'ları çek
+    const schedulesByDepartment = await Promise.all(
+      departments.map(async (department) => {
+        const whereClause = {};
+        if (semester) whereClause.semester = semester;
+        if (year) whereClause.year = year;
+
+        const schedules = await Schedule.findAll({
+          include: [
+            { 
+              model: CourseSection, 
+              as: 'section',
+              where: whereClause,
+              include: [
+                { 
+                  model: Course, 
+                  as: 'course',
+                  where: { departmentId: department.id },
+                  include: [
+                    { model: Department, as: 'department' }
+                  ]
+                },
+                { 
+                  model: Faculty, 
+                  as: 'instructor',
+                  include: [
+                    { model: User, as: 'user', attributes: ['id', 'name', 'email'] }
+                  ]
+                }
+              ]
+            },
+            { model: Classroom, as: 'classroom' }
+          ],
+          order: [
+            ['day_of_week', 'ASC'],
+            ['start_time', 'ASC']
+          ]
+        });
+
+        return {
+          department: {
+            id: department.id,
+            name: department.name,
+            code: department.code,
+            faculty_name: department.faculty_name
+          },
+          schedules: schedules
+        };
+      })
+    );
+
+    res.json({ success: true, data: schedulesByDepartment });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -170,7 +307,13 @@ exports.generateSchedule = async (req, res) => {
       where: whereClause,
       include: [
         { model: Course, as: 'course' },
-        { model: Faculty, as: 'instructor' }
+        { 
+          model: Faculty, 
+          as: 'instructor',
+          include: [
+            { model: User, as: 'user', attributes: ['id', 'name', 'email'] }
+          ]
+        }
       ]
     });
 
@@ -316,7 +459,13 @@ exports.generateSchedule = async (req, res) => {
           as: 'section',
           include: [
             { model: Course, as: 'course' },     // Ders adı için gerekli
-            { model: Faculty, as: 'instructor' }  // Hoca adı için gerekli
+            { 
+              model: Faculty, 
+              as: 'instructor',
+              include: [
+                { model: User, as: 'user', attributes: ['id', 'name', 'email'] }
+              ]
+            }  // Hoca adı için gerekli
           ]
         },
         { model: Classroom, as: 'classroom' }     // Sınıf kodu için gerekli

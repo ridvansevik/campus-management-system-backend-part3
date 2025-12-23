@@ -414,6 +414,18 @@ exports.useReservation = async (req, res) => {
   }
 };
 
+// YENİ: Cafeteria Listesi (Admin/Personel için)
+exports.getCafeterias = async (req, res) => {
+  try {
+    const cafeterias = await Cafeteria.findAll({
+      order: [['name', 'ASC']]
+    });
+    res.json({ success: true, data: cafeterias });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 // YENİ: Menü Oluşturma (Admin/Personel)
 exports.createMenu = async (req, res) => {
   try {
